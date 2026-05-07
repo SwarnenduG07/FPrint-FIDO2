@@ -77,10 +77,13 @@ class CTAP2Handler:
         self._next_cid += 1
         self._channels[new_cid] = nonce
 
-        # Response: nonce(8) + cid(4) + protocol_version(1) + major(1) + minor(1) + build(1) + capabilities(1)
-        response = nonce + struct.pack(">IBBBBB", new_cid, 2, 1, 0, 0, 0x04)  # CTAP2, v1.0, WINK capability
-        
-        return self._build_packet(cid, CTAPHID_INIT, response)
+        # Response: nonce(8) + new_cid(4BE) + protocol(1) + major(1) + minor(1) + build(1) + capabilities(1)
+        response = nonce + struct.pack(">IBBBBB", new_cid, 2, 1, 0, 0, 0x04)
+
+        packet = self._build_packet(BROADCAST_CID, CTAPHID_INIT, response)
+        print(f"[CTAP2] INIT: nonce={nonce.hex()} new_cid={new_cid:08x} response={response.hex()}", flush=True)
+        print(f"[CTAP2] INIT: full packet={packet.hex()}", flush=True)
+        return packet
 
     def _handle_ping(self, cid: int, data: bytes) -> bytes:
         """Handle CTAPHID_PING - echo back the data."""
