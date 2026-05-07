@@ -1,5 +1,6 @@
 """Virtual FIDO2 HID device via /dev/uhid."""
 
+import os
 import struct
 import threading
 from typing import Callable
@@ -51,6 +52,7 @@ class FIDOHIDDevice:
     def create(self) -> None:
         """Create and register the virtual HID device."""
         self._fd = open("/dev/uhid", "r+b", buffering=0)
+        self._fileno = self._fd.fileno()
 
         # Build UHID_CREATE2 event
         name = b"linux-hello FIDO2".ljust(128, b"\x00")
@@ -69,7 +71,7 @@ class FIDOHIDDevice:
         event += struct.pack("<HHIIII", rd_size, bus, vendor, product, version, country)
         event += rd_data
 
-        self._fd.write(event)
+        os.write(self._fileno, event)
 
     def send(self, data: bytes) -> None:
         """
@@ -81,10 +83,12 @@ class FIDOHIDDevice:
         if len(data) != HID_PACKET_SIZE:
             raise ValueError(f"HID packet must be {HID_PACKET_SIZE} bytes")
 
-        # Prepend HID report ID (0x00) — required by uhid INPUT2
+        # uhid_input2_req: size(2) + data[4096]
+        # Prepend HID report ID (0x00)
         report = b"\x00" + data
-        event = struct.pack("<IH", UHID_INPUT2, len(report)) + report
-        self._fd.write(event)
+        event = struct.pack("<IH", UHID_INPUT2, len(report)) + report.ljust(4096, b"\x00")
+        print(f"[HID] SEND {data.hex()[:32]}...", flush=True)
+        os.write(self._fileno, event)
 
     def start(self) -> None:
         """Start listening for packets from the host."""
@@ -103,9 +107,11 @@ class FIDOHIDDevice:
 
     def _read_loop(self) -> None:
         """Background thread that reads events from /dev/uhid."""
+        # Max event size: type(4) + uhid_output_req: data(4096) + size(2) + rtype(1) = 4103
+        EVENT_SIZE = 4103
         while self._running:
             try:
-                raw = self._fd.read(4380)  # max uhid event size
+                raw = os.read(self._fileno, EVENT_SIZE)
                 if not raw:
                     continue
 
