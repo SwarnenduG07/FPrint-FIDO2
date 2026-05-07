@@ -1,0 +1,2 @@
+# Allow user access to /dev/uhid for FIDO2 virtual device
+KERNEL=="uhid", SUBSYSTEM=="misc", MODE="0660", GROUP="input", TAG+="uaccess"

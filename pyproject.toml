@@ -1,0 +1,11 @@
+[project]
+name = "linux-hello"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "cryptography>=48.0.0",
+    "dbus-python>=1.4.0",
+    "fido2>=2.2.0",
+]
