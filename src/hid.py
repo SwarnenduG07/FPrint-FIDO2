@@ -74,14 +74,16 @@ class FIDOHIDDevice:
     def send(self, data: bytes) -> None:
         """
         Send a 64-byte HID report to the host.
-        
+
         Args:
             data: Exactly 64 bytes to send
         """
         if len(data) != HID_PACKET_SIZE:
             raise ValueError(f"HID packet must be {HID_PACKET_SIZE} bytes")
 
-        event = struct.pack("<II", UHID_INPUT2, HID_PACKET_SIZE) + data
+        # Prepend HID report ID (0x00) — required by uhid INPUT2
+        report = b"\x00" + data
+        event = struct.pack("<IH", UHID_INPUT2, len(report)) + report
         self._fd.write(event)
 
     def start(self) -> None:
@@ -112,13 +114,15 @@ class FIDOHIDDevice:
 
                 if event_type == UHID_OUTPUT:
                     # uhid_output_req: data[4096] + size(2) + rtype(1)
-                    # Full event: type(4) + data(4096) + size(2) + rtype(1)
                     data_blob = raw[4 : 4 + 4096]
                     size = struct.unpack_from("<H", raw, 4 + 4096)[0]
                     payload = data_blob[:size]
+                    # Strip leading HID report ID byte (0x00)
+                    if payload and payload[0] == 0x00:
+                        payload = payload[1:]
                     print(f"[HID] OUTPUT size={size} payload={payload.hex()}", flush=True)
-                    if size > 0:
-                        self._on_packet(payload[:HID_PACKET_SIZE].ljust(HID_PACKET_SIZE, b"\x00"))
+                    if len(payload) >= HID_PACKET_SIZE:
+                        self._on_packet(payload[:HID_PACKET_SIZE])
 
             except OSError:
                 break
