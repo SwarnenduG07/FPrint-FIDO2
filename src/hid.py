@@ -83,11 +83,9 @@ class FIDOHIDDevice:
         if len(data) != HID_PACKET_SIZE:
             raise ValueError(f"HID packet must be {HID_PACKET_SIZE} bytes")
 
-        # uhid_input2_req: size(2) + data[4096]
-        # Prepend HID report ID (0x00)
-        report = b"\x00" + data
-        event = struct.pack("<IH", UHID_INPUT2, len(report)) + report.ljust(4096, b"\x00")
-        print(f"[HID] SEND {data.hex()[:32]}...", flush=True)
+        # UHID_INPUT2: type(4) + size(2) + data[4096]
+        event = struct.pack("<IH", UHID_INPUT2, HID_PACKET_SIZE) + data.ljust(4096, b"\x00")
+        print(f"[HID] SEND {data.hex()}", flush=True)
         os.write(self._fileno, event)
 
     def start(self) -> None:
@@ -123,12 +121,12 @@ class FIDOHIDDevice:
                     data_blob = raw[4 : 4 + 4096]
                     size = struct.unpack_from("<H", raw, 4 + 4096)[0]
                     payload = data_blob[:size]
-                    # Strip leading HID report ID byte (0x00)
+                    # Strip leading HID report ID byte if present
                     if payload and payload[0] == 0x00:
                         payload = payload[1:]
                     print(f"[HID] OUTPUT size={size} payload={payload.hex()}", flush=True)
-                    if len(payload) >= HID_PACKET_SIZE:
-                        self._on_packet(payload[:HID_PACKET_SIZE])
+                    if len(payload) == HID_PACKET_SIZE:
+                        self._on_packet(payload)
 
             except OSError:
                 break
