@@ -120,13 +120,72 @@ class CTAP2Handler:
         if ctap_cmd == CTAP2_GET_INFO:
             return self._handle_get_info(cid)
         elif ctap_cmd == CTAP2_MAKE_CREDENTIAL:
-            print("[CTAP2] MakeCredential — not implemented yet")
-            return self._error(cid, CTAP2_ERR_OPERATION_DENIED)
+            return self._handle_make_credential(cid, data[1:])
         elif ctap_cmd == CTAP2_GET_ASSERTION:
             print("[CTAP2] GetAssertion — not implemented yet")
             return self._error(cid, CTAP2_ERR_OPERATION_DENIED)
         else:
             return self._error(cid, CTAP2_ERR_INVALID_COMMAND)
+
+    def _handle_make_credential(self, cid: int, cbor_data: bytes) -> bytes:
+        """Handle authenticatorMakeCredential — register a new credential."""
+        import cbor2
+        import hashlib
+        import crypto
+        import store
+        import fprint
+
+        try:
+            params = cbor2.loads(cbor_data)
+        except Exception as e:
+            print(f"[CTAP2] MakeCredential CBOR parse error: {e}", flush=True)
+            return self._error(cid, CTAP2_ERR_INVALID_COMMAND)
+
+        client_data_hash = bytes(params[1])
+        rp               = params[2]
+        user             = params[3]
+        rp_id            = rp["id"]
+        user_id          = bytes(user["id"])
+        user_name        = user.get("name", "")
+
+        print(f"[CTAP2] MakeCredential rp={rp_id} user={user_name}", flush=True)
+
+        # Fingerprint verification
+        if not fprint.verify_fingerprint():
+            print("[CTAP2] Fingerprint verification failed", flush=True)
+            return self._error(cid, CTAP2_ERR_OPERATION_DENIED)
+
+        # Generate keypair and credential ID
+        cred_id           = crypto.new_credential_id()
+        priv_key, pub_key = crypto.generate_keypair()
+        cose_key          = crypto.public_key_to_cose(pub_key)
+
+        store.save(cred_id, rp_id, user_id, user_name, pub_key, priv_key)
+
+        # Build authenticatorData (spec section 6.1)
+        rp_id_hash = hashlib.sha256(rp_id.encode()).digest()  # 32 bytes
+        flags      = 0x45  # UP(0x01) | UV(0x04) | AT(0x40)
+        aaguid     = b"linux-hello\x00\x00\x00\x00\x00"      # exactly 16 bytes
+
+        auth_data = (
+            rp_id_hash +                                # 32 bytes
+            bytes([flags]) +                            # 1 byte
+            struct.pack(">I", 0) +                      # signCount 4 bytes
+            aaguid +                                    # 16 bytes
+            struct.pack(">H", len(cred_id)) +           # credIdLen 2 bytes
+            cred_id +                                   # credId
+            cose_key                                    # credentialPublicKey
+        )
+
+        att_obj = cbor2.dumps({
+            "fmt":     "none",
+            "attStmt": {},
+            "authData": auth_data,
+        })
+
+        response = bytes([CTAP2_OK]) + att_obj
+        print(f"[CTAP2] MakeCredential OK cred_id={cred_id.hex()}", flush=True)
+        return self._build_response(cid, response)
 
     def _handle_get_info(self, cid: int) -> bytes:
         """Handle authenticatorGetInfo — return device capabilities."""
@@ -159,6 +218,28 @@ class CTAP2Handler:
     def _error(self, cid: int, code: int) -> bytes:
         """Build a CTAPHID_ERROR response."""
         return self._build_packet(cid, CTAPHID_ERROR, bytes([code]))
+
+    def _build_response(self, cid: int, data: bytes) -> list[bytes]:
+        """Build one or more 64-byte HID packets for a response."""
+        packets = []
+
+        # First packet: CID(4) + CMD(1) + LEN_H(1) + LEN_L(1) + DATA[:57]
+        data_len = len(data)
+        header = struct.pack(">IBBB", cid, CTAPHID_CBOR | 0x80,
+                             (data_len >> 8) & 0xFF, data_len & 0xFF)
+        packets.append((header + data[:MAX_INIT_PAYLOAD]).ljust(HID_PACKET_SIZE, b"\x00"))
+
+        # Continuation packets: CID(4) + SEQ(1) + DATA[:59]
+        offset = MAX_INIT_PAYLOAD
+        seq = 0
+        while offset < data_len:
+            chunk = data[offset:offset + MAX_CONT_PAYLOAD]
+            header = struct.pack(">IB", cid, seq & 0x7F)
+            packets.append((header + chunk).ljust(HID_PACKET_SIZE, b"\x00"))
+            offset += MAX_CONT_PAYLOAD
+            seq += 1
+
+        return packets
 
     def _build_packet(self, cid: int, cmd: int, data: bytes) -> bytes:
         """Build a 64-byte HID initialization packet."""
