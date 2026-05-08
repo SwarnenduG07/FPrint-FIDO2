@@ -48,6 +48,7 @@ class FIDOHIDDevice:
         self._fd = None
         self._running = False
         self._thread = None
+        self._send_lock = threading.Lock()
 
     def create(self) -> None:
         """Create and register the virtual HID device."""
@@ -86,7 +87,8 @@ class FIDOHIDDevice:
         # UHID_INPUT2: type(4) + size(2) + data[4096]
         event = struct.pack("<IH", UHID_INPUT2, HID_PACKET_SIZE) + data.ljust(4096, b"\x00")
         print(f"[HID] SEND {data.hex()}", flush=True)
-        os.write(self._fileno, event)
+        with self._send_lock:
+            os.write(self._fileno, event)
 
     def start(self) -> None:
         """Start listening for packets from the host."""
