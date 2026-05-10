@@ -44,18 +44,21 @@ def verify_fingerprint(timeout: int = 30) -> bool:
         dev[0].VerifyStart("any")
         print(f"[FPRINT] Touch fingerprint sensor (user={_REAL_USER})...", flush=True)
 
+        # Wait for result
+        done.wait(timeout=timeout)
+
     except dbus.DBusException as e:
         print(f"[FPRINT] D-Bus error: {e}", flush=True)
-        return False
-
-    # Wait for result (GLib main loop processes signals in background)
-    done.wait(timeout=timeout)
-
-    try:
-        dev[0].VerifyStop()
-        dev[0].Release()
-    except dbus.DBusException:
-        pass
+    finally:
+        if dev[0]:
+            try:
+                dev[0].VerifyStop()
+            except dbus.DBusException:
+                pass
+            try:
+                dev[0].Release()
+            except dbus.DBusException:
+                pass
 
     return matched[0]
 
