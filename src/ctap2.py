@@ -1,6 +1,7 @@
 """CTAP2 protocol handler for FIDO2 HID transport."""
 
 import struct
+import threading
 from typing import Optional
 
 # CTAP HID commands
@@ -33,6 +34,11 @@ class CTAP2Handler:
         self._channels: dict = {}  # cid -> nonce
         self._next_cid: int = 1
         self._pending: dict = {}   # cid -> reassembly state
+        self._device = None        # set via set_device()
+
+    def set_device(self, device) -> None:
+        """Set the HID device reference for sending keepalives."""
+        self._device = device
 
     def handle_packet(self, packet: bytes) -> Optional[bytes]:
         """Process a 64-byte HID packet and return a response, or None."""
@@ -92,6 +98,8 @@ class CTAP2Handler:
             return self._build_packet(cid, CTAPHID_PING, data)
         elif cmd == CTAPHID_CBOR:
             return self._handle_cbor(cid, data)
+        elif cmd in (0x11, 0x3E):  # CANCEL / KEEPALIVE — ignore
+            return None
         else:
             return self._error(cid, CTAP2_ERR_INVALID_COMMAND)
 
@@ -134,6 +142,8 @@ class CTAP2Handler:
         import crypto
         import store
         import fprint
+        from fido2.webauthn import AuthenticatorData, AttestedCredentialData, Aaguid
+        from fido2 import cbor as fido2_cbor
 
         try:
             params = cbor2.loads(cbor_data)
@@ -141,46 +151,48 @@ class CTAP2Handler:
             print(f"[CTAP2] MakeCredential CBOR parse error: {e}", flush=True)
             return self._error(cid, CTAP2_ERR_INVALID_COMMAND)
 
-        client_data_hash = bytes(params[1])
-        rp               = params[2]
-        user             = params[3]
-        rp_id            = rp["id"]
-        user_id          = bytes(user["id"])
-        user_name        = user.get("name", "")
+        rp        = params[2]
+        user      = params[3]
+        rp_id     = rp["id"]
+        user_id   = bytes(user["id"])
+        user_name = user.get("name", "")
 
         print(f"[CTAP2] MakeCredential rp={rp_id} user={user_name}", flush=True)
 
-        # Fingerprint verification
-        if not fprint.verify_fingerprint():
-            print("[CTAP2] Fingerprint verification failed", flush=True)
-            return self._error(cid, CTAP2_ERR_OPERATION_DENIED)
+        # Start keepalives while waiting for fingerprint
+        stop_kav = threading.Event()
+        if self._device:
+            import threading as _t
+            _t.Thread(
+                target=self._send_keepalives,
+                args=(cid, stop_kav),
+                daemon=True
+            ).start()
 
-        # Generate keypair and credential ID
+        try:
+            if not fprint.verify_fingerprint():
+                print("[CTAP2] Fingerprint verification failed", flush=True)
+                return self._error(cid, CTAP2_ERR_OPERATION_DENIED)
+        finally:
+            stop_kav.set()
+
         cred_id           = crypto.new_credential_id()
         priv_key, pub_key = crypto.generate_keypair()
         cose_key          = crypto.public_key_to_cose(pub_key)
 
         store.save(cred_id, rp_id, user_id, user_name, pub_key, priv_key)
 
-        # Build authenticatorData (spec section 6.1)
-        rp_id_hash = hashlib.sha256(rp_id.encode()).digest()  # 32 bytes
-        flags      = 0x45  # UP(0x01) | UV(0x04) | AT(0x40)
-        aaguid     = b"linux-hello\x00\x00\x00\x00\x00"      # exactly 16 bytes
+        # Build authData using fido2 library for correct encoding
+        rp_id_hash = hashlib.sha256(rp_id.encode()).digest()
+        aaguid     = Aaguid(b"linux-hello\x00\x00\x00\x00\x00")
+        cred_data  = AttestedCredentialData.create(aaguid, cred_id, cbor2.loads(cose_key))
+        flags      = AuthenticatorData.FLAG.UP | AuthenticatorData.FLAG.UV | AuthenticatorData.FLAG.AT
+        auth_data  = AuthenticatorData.create(rp_id_hash, flags, 0, bytes(cred_data))
 
-        auth_data = (
-            rp_id_hash +                                # 32 bytes
-            bytes([flags]) +                            # 1 byte
-            struct.pack(">I", 0) +                      # signCount 4 bytes
-            aaguid +                                    # 16 bytes
-            struct.pack(">H", len(cred_id)) +           # credIdLen 2 bytes
-            cred_id +                                   # credId
-            cose_key                                    # credentialPublicKey
-        )
-
-        att_obj = cbor2.dumps({
-            "fmt":     "none",
-            "attStmt": {},
-            "authData": auth_data,
+        att_obj = fido2_cbor.encode({
+            "fmt":      "none",
+            "attStmt":  {},
+            "authData": bytes(auth_data),
         })
 
         response = bytes([CTAP2_OK]) + att_obj
@@ -214,6 +226,17 @@ class CTAP2Handler:
         response = bytes([CTAP2_OK]) + info
         print(f"[CTAP2] GetInfo OK", flush=True)
         return self._build_packet(cid, CTAPHID_CBOR, response)
+
+    def _send_keepalives(self, cid: int, stop: threading.Event) -> None:
+        """Send CTAPHID_KEEPALIVE every 100ms until stop is set."""
+        import time
+        while not stop.wait(0.1):
+            pkt = struct.pack(">IBBB", cid, 0x3B | 0x80, 0, 1) + bytes([0x02])
+            pkt = pkt.ljust(64, b"\x00")
+            try:
+                self._device.send(pkt)
+            except Exception:
+                break
 
     def _error(self, cid: int, code: int) -> bytes:
         """Build a CTAPHID_ERROR response."""
