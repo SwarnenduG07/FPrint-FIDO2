@@ -129,6 +129,8 @@ class FIDOHIDDevice:
                     print(f"[HID] OUTPUT size={size} payload={payload.hex()}", flush=True)
                     if len(payload) == HID_PACKET_SIZE:
                         self._on_packet(payload)
+                else:
+                    print(f"[HID] event_type={event_type} len={len(raw)}", flush=True)
 
             except OSError:
                 break

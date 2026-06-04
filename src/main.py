@@ -4,6 +4,7 @@ import signal
 import sys
 import struct
 import threading
+import queue
 from hid import FIDOHIDDevice
 from ctap2 import CTAP2Handler
 
@@ -12,8 +13,8 @@ STATUS_UPNEEDED   = 0x02
 
 
 def send_keepalives(device: FIDOHIDDevice, cid: int, stop: threading.Event) -> None:
-    """Send keepalive packets every 100ms until stop is set."""
-    while not stop.wait(0.1):
+    """Send keepalive packets every 500ms until stop is set."""
+    while not stop.wait(0.5):
         pkt = struct.pack(">IBBB", cid, CTAPHID_KEEPALIVE | 0x80, 0, 1) + bytes([STATUS_UPNEEDED])
         pkt = pkt.ljust(64, b"\x00")
         try:
@@ -22,17 +23,44 @@ def send_keepalives(device: FIDOHIDDevice, cid: int, stop: threading.Event) -> N
             break
 
 
-def handle_packet(device: FIDOHIDDevice, ctap: CTAP2Handler, data: bytes) -> None:
-    """Handle incoming HID packet — runs in HID read thread."""
-    response = ctap.handle_packet(data)
-    if response is None:
-        return
+class PacketWorker:
+    """
+    Single worker thread that processes packets sequentially.
+    The HID read loop feeds packets here via a queue so it never blocks.
+    """
 
-    # If this is a long-op response, send keepalives were already running.
-    # Just send the response packets.
-    packets = response if isinstance(response, list) else [response]
-    for pkt in packets:
-        device.send(pkt)
+    def __init__(self, device: FIDOHIDDevice, ctap: CTAP2Handler):
+        self._device = device
+        self._ctap   = ctap
+        self._queue  = queue.Queue()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def submit(self, data: bytes) -> None:
+        self._queue.put(data)
+
+    def _run(self) -> None:
+        while True:
+            data = self._queue.get()
+            cid  = struct.unpack_from(">I", data, 0)[0]
+
+            stop_kav = threading.Event()
+            kav = threading.Thread(
+                target=send_keepalives, args=(self._device, cid, stop_kav), daemon=True
+            )
+            kav.start()
+
+            try:
+                response = self._ctap.handle_packet(data)
+            finally:
+                stop_kav.set()
+                kav.join(timeout=1.0)
+
+            if response is None:
+                continue
+
+            for pkt in (response if isinstance(response, list) else [response]):
+                self._device.send(pkt)
 
 
 def main() -> None:
@@ -40,13 +68,11 @@ def main() -> None:
     print("Starting linux-hello FIDO2 authenticator...")
 
     ctap   = CTAP2Handler()
+    device = FIDOHIDDevice(on_packet=lambda data: None)  # placeholder
+    worker = PacketWorker(device, ctap)
 
-    # Pass device reference to ctap so it can send keepalives during fingerprint
-    def on_packet(data: bytes) -> None:
-        handle_packet(device, ctap, data)
-
-    device = FIDOHIDDevice(on_packet=on_packet)
-    ctap.set_device(device)
+    # Wire on_packet to worker after both are created
+    device._on_packet = worker.submit
 
     try:
         device.create()
