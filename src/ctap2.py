@@ -186,8 +186,15 @@ class CTAP2Handler:
         rp_id_hash = hashlib.sha256(rp_id.encode()).digest()
         aaguid     = Aaguid(b"linux-hello\x00\x00\x00\x00\x00")
         cred_data  = AttestedCredentialData.create(aaguid, cred_id, cbor2.loads(cose_key))
-        flags      = AuthenticatorData.FLAG.UP | AuthenticatorData.FLAG.UV | AuthenticatorData.FLAG.AT
-        auth_data  = AuthenticatorData.create(rp_id_hash, flags, 0, bytes(cred_data))
+        # Include ED flag if extensions present, respond to credProps
+        extensions = params.get(6)  # key 6 = extensions
+        ext_response = None
+        if extensions and "credProps" in extensions:
+            ext_response = {"credProps": {"rk": True}}
+        flags = AuthenticatorData.FLAG.UP | AuthenticatorData.FLAG.UV | AuthenticatorData.FLAG.AT
+        if ext_response:
+            flags |= AuthenticatorData.FLAG.ED
+        auth_data = AuthenticatorData.create(rp_id_hash, flags, 0, bytes(cred_data), ext_response)
 
         att_obj = fido2_cbor.encode({
             "fmt":      "none",
@@ -201,9 +208,9 @@ class CTAP2Handler:
 
     def _handle_get_info(self, cid: int) -> bytes:
         """Handle authenticatorGetInfo — return device capabilities."""
-        # CBOR map: {1: ["FIDO_2_0"], 3: aaguid(16), 4: {rk: true, uv: true}, 5: 1024}
+        # CBOR map: {1: versions, 3: aaguid, 4: options, 5: maxMsgSize, 6: pinProtocols, 9: transports}
         info = bytes([
-            0xA4,  # map(4)
+            0xA5,  # map(5)
 
             0x01,  # key 1: versions
             0x81,  # array(1)
@@ -221,6 +228,10 @@ class CTAP2Handler:
 
             0x05,  # key 5: maxMsgSize
             0x19, 0x04, 0x00,  # 1024
+
+            0x09,  # key 9: transports
+            0x81,  # array(1)
+            0x63, 0x75, 0x73, 0x62,  # "usb"
         ])
 
         response = bytes([CTAP2_OK]) + info

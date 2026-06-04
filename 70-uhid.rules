@@ -1,5 +1,7 @@
 # Allow user access to /dev/uhid for linux-hello FIDO2 virtual device
 KERNEL=="uhid", SUBSYSTEM=="misc", MODE="0660", GROUP="input", TAG+="uaccess"
 
-# Allow user access to the virtual FIDO2 HID device
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="0001", MODE="0660", GROUP="input", TAG+="uaccess"
+# Tag linux-hello FIDO2 virtual device and allow user access
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="0001", \
+    IMPORT{program}="/usr/lib/udev/fido_id $env{DEVPATH}", \
+    MODE="0660", GROUP="input", TAG+="uaccess", TAG+="security-device"
